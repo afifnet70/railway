@@ -263,14 +263,18 @@ def main():
         # Display Results
         st.subheader("🧬 Generated SOAP Note")
         
-        # Nice display box
+        # Fixed: Black text in SOAP box
         st.markdown(f"""
         <div style="
-            background: #f0f8ff;
+            background: #f8f9fa;
             border-left: 5px solid #007bff;
             padding: 20px;
             border-radius: 5px;
             margin: 10px 0;
+            color: #000000;           /* BLACK TEXT */
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.6;
         ">
             {soap_note.replace(chr(10), '<br>')}
         </div>
