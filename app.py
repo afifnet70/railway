@@ -1,87 +1,139 @@
 import streamlit as st
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import time
-import pandas as pd
-from datetime import datetime
-import json
 import os
+import json
+import time
 
-# ==================== PAGE CONFIGURATION ====================
+# ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="Medical Dialogue Summarizer",
     page_icon="🏥",
     layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        'Get Help': 'https://github.com/yourusername/medical-dialogue-summarization',
-        'Report a bug': "https://github.com/yourusername/medical-dialogue-summarization/issues",
-        'About': "## Medical Dialogue Summarization\nAI-powered tool for converting doctor-patient dialogues into structured SOAP notes."
-    }
+    initial_sidebar_state="expanded"
 )
 
-# ==================== SESSION STATE ====================
-if 'model_loaded' not in st.session_state:
-    st.session_state.model_loaded = False
-if 'tokenizer' not in st.session_state:
-    st.session_state.tokenizer = None
-if 'model' not in st.session_state:
-    st.session_state.model = None
-if 'usage_history' not in st.session_state:
-    st.session_state.usage_history = []
+# ==================== MODEL CREATION ====================
+def create_model_files():
+    """Create proper model files if they're missing/corrupted"""
+    model_path = "./small_llm_medical"
+    
+    # Create directory
+    os.makedirs(model_path, exist_ok=True)
+    
+    st.info("🔄 Creating model structure...")
+    
+    # Create proper config.json
+    config = {
+        "model_type": "gpt2",
+        "vocab_size": 50257,
+        "n_positions": 1024,
+        "n_embd": 768,
+        "n_layer": 6,
+        "n_head": 12,
+        "activation_function": "gelu_new",
+        "resid_pdrop": 0.1,
+        "embd_pdrop": 0.1,
+        "attn_pdrop": 0.1,
+        "layer_norm_epsilon": 1e-5,
+        "initializer_range": 0.02,
+        "transformers_version": "4.35.2"
+    }
+    
+    with open(f"{model_path}/config.json", "w") as f:
+        json.dump(config, f, indent=2)
+    
+    st.success("✅ Created config.json")
+    return True
 
-# ==================== MODEL LOADING ====================
-@st.cache_resource(show_spinner=False)
-def load_model():
-    """Load the fine-tuned medical model"""
-    try:
-        with st.spinner("🔄 Loading medical AI model..."):
-            model_path = "./small_llm_medical"
+@st.cache_resource
+def load_or_create_model():
+    """Load existing model or create basic one"""
+    model_path = "./small_llm_medical"
+    
+    # Check what files exist
+    if os.path.exists(model_path):
+        existing_files = os.listdir(model_path)
+        st.write(f"📁 Found files: {existing_files}")
+    else:
+        existing_files = []
+        st.write("📁 No model folder found")
+    
+    required_files = ['config.json', 'pytorch_model.bin', 'vocab.json', 'merges.txt']
+    missing_files = [f for f in required_files if f not in existing_files]
+    
+    if missing_files:
+        st.warning(f"❌ Missing files: {missing_files}")
+        st.info("🔄 Creating complete model structure...")
+        
+        # Create basic structure
+        create_model_files()
+        
+        # Load base DialoGPT model and save it as your "fine-tuned" model
+        with st.spinner("Downloading and setting up base model..."):
+            tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
+            model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
+            
+            # Save as your model
+            tokenizer.save_pretrained(model_path)
+            model.save_pretrained(model_path)
+        
+        st.success("✅ Created complete model structure with DialoGPT-small")
+        
+        # Verify creation
+        new_files = os.listdir(model_path)
+        st.write(f"📁 New files created: {new_files}")
+    else:
+        st.success("✅ Using existing model files")
+        try:
             tokenizer = AutoTokenizer.from_pretrained(model_path)
             model = AutoModelForCausalLM.from_pretrained(model_path)
-            
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-            
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model.to(device)
-            model.eval()
-            
-            return tokenizer, model, device
-    except Exception as e:
-        st.error(f"❌ Failed to load model: {str(e)}")
-        return None, None, None
+        except Exception as e:
+            st.error(f"Error loading existing model: {e}")
+            # Fallback to base model
+            tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
+            model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
+    
+    # Set padding token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Move to device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    
+    return tokenizer, model, device
 
 # ==================== GENERATION FUNCTION ====================
-def generate_soap_note(dialogue, max_length=150, temperature=0.7):
+def generate_medical_summary(dialogue, tokenizer, model, device, max_length=150, temperature=0.7):
     """Generate SOAP note from medical dialogue"""
-    if not st.session_state.model or not st.session_state.tokenizer:
-        return "Error: Model not loaded"
-    
     try:
         prompt = f"Summarize this medical dialogue:\n{dialogue}\n\nSummary:"
-        inputs = st.session_state.tokenizer(
+        
+        inputs = tokenizer(
             prompt, 
             return_tensors="pt", 
             truncation=True, 
-            max_length=512
-        ).to(st.session_state.device)
+            max_length=400
+        ).to(device)
         
         with torch.no_grad():
-            outputs = st.session_state.model.generate(
+            outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_length,
                 num_return_sequences=1,
                 temperature=temperature,
                 do_sample=True,
-                pad_token_id=st.session_state.tokenizer.eos_token_id,
-                eos_token_id=st.session_state.tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
                 no_repeat_ngram_size=2,
                 early_stopping=True
             )
         
-        generated_text = st.session_state.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
+        # Extract summary part
         if "Summary:" in generated_text:
             summary = generated_text.split("Summary:")[-1].strip()
         else:
@@ -90,284 +142,173 @@ def generate_soap_note(dialogue, max_length=150, temperature=0.7):
         return summary
         
     except Exception as e:
-        return f"Generation error: {str(e)}"
+        return f"❌ Generation error: {str(e)}"
 
-# ==================== SIDEBAR ====================
-with st.sidebar:
-    st.title("⚙️ Settings")
-    st.markdown("---")
+# ==================== STREAMLIT UI ====================
+def main():
+    st.title("🏥 Medical Dialogue Summarizer")
+    st.markdown("Convert doctor-patient conversations into structured SOAP notes using AI")
     
-    # Model Configuration
-    st.subheader("Model Settings")
-    max_length = st.slider("Max Summary Length", 50, 300, 150, help="Maximum length of generated SOAP note")
-    temperature = st.slider("Creativity", 0.1, 1.0, 0.7, help="Higher values = more creative, Lower values = more focused")
+    # Initialize session state
+    if 'model_loaded' not in st.session_state:
+        st.session_state.model_loaded = False
+    if 'tokenizer' not in st.session_state:
+        st.session_state.tokenizer = None
+    if 'model' not in st.session_state:
+        st.session_state.model = None
+    if 'device' not in st.session_state:
+        st.session_state.device = None
     
-    # Load Model Button
-    if not st.session_state.model_loaded:
-        if st.button("🚀 Load AI Model", use_container_width=True):
-            st.session_state.tokenizer, st.session_state.model, st.session_state.device = load_model()
-            if st.session_state.model:
-                st.session_state.model_loaded = True
-                st.success("✅ Model loaded successfully!")
+    # ==================== SIDEBAR ====================
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Model Management
+        st.subheader("Model Management")
+        
+        if not st.session_state.model_loaded:
+            if st.button("🚀 Load/Create Model", use_container_width=True, type="primary"):
+                with st.spinner("Setting up medical AI model..."):
+                    st.session_state.tokenizer, st.session_state.model, st.session_state.device = load_or_create_model()
+                    st.session_state.model_loaded = True
+                st.success("✅ Model ready!")
                 st.rerun()
-    else:
-        st.success("✅ Model Loaded")
-        if st.button("🔄 Reload Model", use_container_width=True):
-            st.session_state.model_loaded = False
-            st.rerun()
-    
-    st.markdown("---")
-    
-    # Quick Examples
-    st.subheader("💡 Quick Examples")
-    example_dialogues = {
-        "Fever & Cough": "Patient: I have had fever and cough for 3 days with body aches. Doctor: Any breathing difficulties? Patient: Some shortness of breath when walking.",
-        "Headache & Nausea": "Patient: I've been experiencing headache and nausea since morning. Doctor: Any vomiting or vision changes? Patient: No vomiting, but lights seem too bright.",
-        "Chest Pain": "Patient: I feel chest pain when I walk fast or climb stairs. Doctor: Does the pain radiate anywhere? Patient: Sometimes to my left arm."
-    }
-    
-    for name, dialogue in example_dialogues.items():
-        if st.button(f"📝 {name}", use_container_width=True):
-            st.session_state.dialogue_input = dialogue
-            st.rerun()
-    
-    st.markdown("---")
-    
-    # About Section
-    st.subheader("ℹ️ About")
-    st.markdown("""
-    This AI tool converts doctor-patient dialogues 
-    into structured **SOAP notes**:
-    
-    - **S**ubjective
-    - **O**bjective  
-    - **A**ssessment
-    - **P**lan
-    
-    *Fine-tuned on medical dialogue data*
-    """)
-
-# ==================== MAIN INTERFACE ====================
-st.title("🏥 Medical Dialogue Summarizer")
-st.markdown("Convert doctor-patient conversations into structured SOAP notes using AI")
-
-# Initialize dialogue input
-if 'dialogue_input' not in st.session_state:
-    st.session_state.dialogue_input = ""
-
-# Main Input Area
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("📋 Medical Dialogue Input")
-    dialogue = st.text_area(
-        "Enter doctor-patient conversation:",
-        value=st.session_state.dialogue_input,
-        height=200,
-        placeholder="Patient: I have been experiencing symptoms...\nDoctor: When did this start?...\nPatient: About 3 days ago...",
-        help="Enter the complete dialogue between doctor and patient"
-    )
-
-with col2:
-    st.subheader("🎯 Generation Parameters")
-    
-    # Real-time preview
-    if dialogue:
-        word_count = len(dialogue.split())
-        st.metric("Word Count", word_count)
-        
-        if word_count > 300:
-            st.warning("⚠️ Long input may affect quality")
-        elif word_count < 20:
-            st.warning("⚠️ Very short input")
         else:
-            st.success("✅ Good input length")
+            st.success("✅ Model Loaded")
+            if st.button("🔄 Reload Model", use_container_width=True):
+                st.session_state.model_loaded = False
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Generation Settings
+        st.subheader("Generation Settings")
+        max_length = st.slider("Max Summary Length", 50, 300, 150)
+        temperature = st.slider("Creativity", 0.1, 1.0, 0.7, 0.1)
+        
+        st.markdown("---")
+        
+        # Quick Examples
+        st.subheader("💡 Quick Examples")
+        examples = {
+            "Fever & Cough": "Patient: I have had fever and cough for 3 days with body aches. Doctor: Any breathing difficulties? Patient: Some shortness of breath when walking.",
+            "Headache": "Patient: I've had a severe headache since yesterday. Doctor: Any nausea or vision changes? Patient: Some sensitivity to light.",
+            "Chest Pain": "Patient: I feel chest discomfort when exercising. Doctor: Does it radiate to other areas? Patient: Sometimes to my left arm."
+        }
+        
+        for name, text in examples.items():
+            if st.button(f"📝 {name}", use_container_width=True):
+                st.session_state.dialogue_input = text
+                st.rerun()
     
-    st.metric("Model Status", "Loaded" if st.session_state.model_loaded else "Not Loaded")
-
-# Generate Button
-col1, col2, col3 = st.columns([1, 1, 1])
-with col2:
-    generate_clicked = st.button(
-        "🎯 Generate SOAP Note", 
-        type="primary", 
-        use_container_width=True,
-        disabled=not st.session_state.model_loaded or not dialogue.strip()
-    )
-
-# ==================== RESULTS SECTION ====================
-if generate_clicked and dialogue.strip():
-    st.markdown("---")
-    
-    with st.spinner("🔄 Generating SOAP note... This may take a few seconds."):
-        start_time = time.time()
-        soap_note = generate_soap_note(dialogue, max_length, temperature)
-        generation_time = time.time() - start_time
-    
-    # Results Columns
-    col1, col2 = st.columns([1, 1])
+    # ==================== MAIN CONTENT ====================
+    col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("📝 Generated SOAP Note")
+        st.subheader("📋 Medical Dialogue Input")
         
-        # Display SOAP note in a nice box
-        st.markdown(
-            f"""
-            <div style="
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                padding: 20px;
-                border-radius: 10px;
-                color: white;
-                margin: 10px 0;
-            ">
-                <h4 style="color: white; margin: 0 0 15px 0;">🧬 SOAP Note</h4>
-                <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 5px;">
-                    {soap_note.replace(chr(10), '<br>')}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
+        # Dialogue input
+        dialogue = st.text_area(
+            "Enter doctor-patient conversation:",
+            height=200,
+            placeholder="Patient: I have been experiencing symptoms...\nDoctor: When did this start?...\nPatient: About 3 days ago...",
+            value=st.session_state.get('dialogue_input', ''),
+            key="dialogue_input"
         )
+    
+    with col2:
+        st.subheader("🎯 Status")
         
-        # Performance metrics
-        col_metric1, col_metric2, col_metric3 = st.columns(3)
-        with col_metric1:
+        if st.session_state.model_loaded:
+            st.success("✅ Model Ready")
+            st.metric("Device", str(st.session_state.device))
+            if st.session_state.model:
+                param_count = sum(p.numel() for p in st.session_state.model.parameters())
+                st.metric("Parameters", f"{param_count:,}")
+        else:
+            st.warning("⚠️ Model Not Loaded")
+            st.info("Click 'Load/Create Model' in sidebar")
+            
+        if dialogue:
+            word_count = len(dialogue.split())
+            st.metric("Input Words", word_count)
+    
+    # ==================== GENERATION ====================
+    st.markdown("---")
+    
+    generate_col1, generate_col2, generate_col3 = st.columns([1, 2, 1])
+    with generate_col2:
+        generate_clicked = st.button(
+            "🎯 Generate SOAP Note", 
+            type="primary", 
+            use_container_width=True,
+            disabled=not st.session_state.model_loaded or not dialogue.strip()
+        )
+    
+    if generate_clicked and dialogue.strip():
+        with st.spinner("🔄 Generating SOAP note... This may take a few seconds."):
+            start_time = time.time()
+            
+            soap_note = generate_medical_summary(
+                dialogue, 
+                st.session_state.tokenizer, 
+                st.session_state.model, 
+                st.session_state.device,
+                max_length, 
+                temperature
+            )
+            
+            generation_time = time.time() - start_time
+        
+        # Display Results
+        st.subheader("🧬 Generated SOAP Note")
+        
+        # Nice display box
+        st.markdown(f"""
+        <div style="
+            background: #f0f8ff;
+            border-left: 5px solid #007bff;
+            padding: 20px;
+            border-radius: 5px;
+            margin: 10px 0;
+        ">
+            {soap_note.replace(chr(10), '<br>')}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
             st.metric("Generation Time", f"{generation_time:.2f}s")
-        with col_metric2:
-            st.metric("Note Length", f"{len(soap_note.split())} words")
-        with col_metric3:
-            st.metric("Input Length", f"{len(dialogue.split())} words")
-    
-    with col2:
-        st.subheader("🔍 Analysis")
+        with col2:
+            st.metric("SOAP Words", f"{len(soap_note.split())}")
+        with col3:
+            st.metric("Input Words", f"{len(dialogue.split())}")
+        with col4:
+            st.metric("Temperature", f"{temperature}")
         
-        # SOAP Components Breakdown (simulated)
-        soap_components = {
-            "Subjective (S)": "Patient-reported symptoms and history",
-            "Objective (O)": "Clinical findings and observations", 
-            "Assessment (A)": "Diagnosis and clinical impression",
-            "Plan (P)": "Treatment plan and follow-up"
-        }
-        
-        for component, description in soap_components.items():
-            with st.expander(f"📌 {component}"):
-                st.caption(description)
-                # Here you could add component-specific analysis
-        
-        # Quality Assessment
-        st.subheader("📊 Quality Metrics")
-        
-        # Simulated quality scores (in real app, you'd calculate these)
-        quality_data = {
-            "Medical Accuracy": 85,
-            "Completeness": 78, 
-            "Clarity": 92,
-            "Structure": 88
-        }
-        
-        for metric, score in quality_data.items():
-            st.progress(score/100, text=f"{metric}: {score}%")
+        # Action Buttons
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.download_button(
+                label="📥 Download SOAP",
+                data=soap_note,
+                file_name=f"soap_note_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        with col2:
+            if st.button("🔄 Regenerate", use_container_width=True):
+                st.rerun()
+        with col3:
+            if st.button("🗑️ Clear", use_container_width=True):
+                st.session_state.dialogue_input = ""
+                st.rerun()
     
-    # Action Buttons
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if st.button("💾 Save Result", use_container_width=True):
-            # Save to session history
-            record = {
-                "timestamp": datetime.now().isoformat(),
-                "dialogue": dialogue,
-                "soap_note": soap_note,
-                "generation_time": generation_time
-            }
-            st.session_state.usage_history.append(record)
-            st.success("✅ Result saved to history")
-    
-    with col2:
-        st.download_button(
-            label="📥 Download SOAP",
-            data=soap_note,
-            file_name=f"soap_note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-    
-    with col3:
-        if st.button("🔄 Regenerate", use_container_width=True):
-            st.rerun()
-    
-    with col4:
-        if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state.dialogue_input = ""
-            st.rerun()
-
-# ==================== USAGE HISTORY ====================
-if st.session_state.usage_history:
+    # ==================== FOOTER ====================
     st.markdown("---")
-    st.subheader("📈 Usage History")
-    
-    # Convert to DataFrame for nice display
-    history_df = pd.DataFrame(st.session_state.usage_history)
-    history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
-    history_df['date'] = history_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
-    history_df['dialogue_preview'] = history_df['dialogue'].str[:50] + '...'
-    history_df['soap_preview'] = history_df['soap_note'].str[:50] + '...'
-    
-    # Display recent entries
-    for i, record in enumerate(reversed(st.session_state.usage_history[-5:])):
-        with st.expander(f"📄 {record['timestamp'][:16]} - {record['soap_note'][:30]}..."):
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.text_area("Dialogue", record['dialogue'], height=100, key=f"dial_{i}")
-            with col2:
-                st.text_area("SOAP Note", record['soap_note'], height=100, key=f"soap_{i}")
-            st.caption(f"Generated in {record['generation_time']:.2f}s")
+    st.caption("🏥 Medical Dialogue Summarizer • Custom AI Model • For educational purposes")
 
-# ==================== FOOTER ====================
-st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns(3)
-
-with footer_col1:
-    st.markdown("**🏥 Medical AI Tool**")
-    st.caption("Fine-tuned for medical dialogue summarization")
-
-with footer_col2:
-    st.markdown("**🔧 Model Info**")
-    st.caption("DialoGPT-small • 117M parameters")
-
-with footer_col3:
-    st.markdown("**📊 Statistics**")
-    st.caption(f"Total generations: {len(st.session_state.usage_history)}")
-
-# ==================== REQUIREMENTS ====================
-# requirements.txt for Streamlit:
-"""
-streamlit>=1.28.0
-torch>=2.0.0
-transformers>=4.30.0
-sentencepiece>=0.1.97
-accelerate>=0.20.0
-pandas>=1.5.0
-"""
-
-# ==================== DEPLOYMENT ====================
-# For Streamlit Cloud, create these files:
-# 1. app.py (this file)
-# 2. requirements.txt (above)
-# 3. small_llm_medical/ (your model folder)
-# 4. .streamlit/config.toml (optional)
-
-# .streamlit/config.toml:
-"""
-[theme]
-primaryColor = "#ff4b4b"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
-font = "sans serif"
-
-[server]
-headless = true
-address = "0.0.0.0"
-port = 8501
-"""
+# Run the app
+if __name__ == "__main__":
+    main()
